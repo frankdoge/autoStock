@@ -1,0 +1,1 @@
+select * from daily_stock order by date desc limit 10;
