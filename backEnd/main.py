@@ -1,91 +1,17 @@
-from typing import Union
-import redis
 import easyquotation
-import easytrader
 import json
 import uvicorn
 import pandas as pd
 import numpy as np
-import psycopg2
-from fastapi import FastAPI,Header,Body,Form,Request
-from pydantic import BaseModel
 from typing import Optional
-from fastapi.templating import Jinja2Templates
 import datetime
-import time
-import tushare as ts
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import re
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-# from Utils import *
-
-# 调用easytrader下单程序
-bigdata1 = easytrader.use('universal_client')#定义使用universal_client
+from Utils import *
+from scheduleTask import *
 
 
-# 使用fastapi作为web服务框架
-app = FastAPI(title='股票自动交易系统',description='基于vue+fastapi的股票策略选定观望自行交易系统的接口文档')
 
-pro = ts.pro_api('ebd374898a15c69a938b0b6c2de6beb2854b694a4bbe6c731640bfc4')
-
-# 连接postgresql数据库
-conn = psycopg2.connect(database='stock', user='postgres',password='csubigdata',host='localhost',port='5432')
-cur = conn.cursor()
-
-# 在本地连接redis
-pool = redis.ConnectionPool(host='127.0.0.1', port=6379)
-r = redis.Redis(connection_pool=pool, decode_responses=True)
-
-#设置一个全局变量来控制股票订单
-update_dict = {}
-
-# 将交易日历设置为全局变量，trade_cal[0]表示当日，trade_cal[1]表示前一日
-current = datetime.datetime.now()
-before = current + datetime.timedelta(days=-90)
-current = current.strftime("%Y%m%d")
-before = before.strftime("%Y%m%d")
-trade_cal = pro.trade_cal(
-    start_date= before, end_date=current, is_open='1'
-)['cal_date'].tolist()
-
-# 启动easytrader从而可以访问数据
-def start():
-    try:
-        bigdata1.prepare(user='123456789', comm_password='123456',exe_path=r'C:\\ths\\xiadan.exe')
-    except:
-        bigdata1.prepare(user='123456789', comm_password='123456',exe_path=r'C:\\ths\\xiadan.exe')
-
-# 从tushare转换为数据库格式
-def my_normalize_code(code):
-    dic_code = {'sz':'XSHE','sh':'XSHG'}
-    code_pre = code[:2]
-    new_code = code[2:] + '.' + dic_code[code_pre]
-    return new_code
-def get_all_stock_code():
-    quotation = easyquotation.use('sina')
-    data = quotation.market_snapshot(prefix=True)
-    code_list = list(data.keys())
-    new_code_list = [my_normalize_code(code) for code in code_list]
-    return new_code_list
-
-#将股票代码转换为easyquotation开源接口格式
-def denormalize_code(code:str):
-    dic_code = {'XSHE':'sz','XSHG':'sh'}
-    code_orig = code[7:]
-    code_new = dic_code[code_orig] + code[:6]
-    return code_new
-
-def all_securities():
-    # 获取当前时间和半个月前时间来获取上一个交易日
-    day_before = trade_cal[1]
-    sql1 = 'SELECT name,close,code FROM daily_stock where date = \'%s\'' %(day_before)
-    cur.execute(sql1)
-    data = cur.fetchall()
-    df = pd.DataFrame(data,columns=['name','close','code'])
-    return df.to_json(orient="records")
-
-# all_securities()
 # 定义传入的请求体参数,为两个均线长短值
 class MA(BaseModel):
     md1: int
@@ -98,12 +24,6 @@ class stock(BaseModel):
     close:float
 
 
-#使用sina开源接口来获取实时数据
-quotation = easyquotation.use('sina')
-
-
-# 创建一个scheduler实例
-scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
 
 # 启动scheduler
 @app.on_event("startup")
@@ -113,174 +33,6 @@ async def startup_event():
     scheduler.start()
 
 
-# @scheduler.scheduled_job('cron',hour='*',minute='*/1', day_of_week ='0-6')
-# async def test_cron():
-#     flag = await start_judge()
-#     trade_info = bigdata1.today_trades
-#     return trade_info
- 
-
-# 在工作日使用cron表达式使每个工作日(不含特殊节假日)9:00-11:59/13:00-15:59每半小时执行的定时任务
-@scheduler.scheduled_job('cron',hour='9-11,13-15',minute='*/10', day_of_week ='0-4')
-async def cron_job():
-    # 执行任务的内容，例如打印当前时间
-    current_time = datetime.datetime.now()
-    current_day = current_time.date()
-    print(f"The current time is {current_time}")
-    start_time = datetime.datetime(current_day.year,current_day.month,current_day.day,9,30,0)
-    end_time1 = start_time + datetime.timedelta(minutes=120)
-    end_time2 = start_time + datetime.timedelta(minutes=330)
-    if current_time<start_time or current_time>end_time2 or (current_time>end_time1 and current_time<(end_time1+datetime.timedelta(minutes=60))):
-        print("当前正休市，任务不执行")
-        return
-    flag = await start_judge()
-    if flag == 'success':
-        # 获取观望中/已买入所有订单
-        sql = 'select id,code,state,updated_time,stra_param_buy,stra_param_sell,amount from stockorder where state = 0 or state = 1'
-        cur.execute(sql)
-        order = cur.fetchall()
-        order_df = pd.DataFrame(order, columns=['id','code','state','updated_time','stra_param_buy','stra_param_sell','amount'])
-        # 存储操作记录用于更新数据库
-        global update_dict 
-        # 获取实时数据
-        data = quotation.market_snapshot(prefix=True)
-
-        for index,row in order_df.iterrows():
-            code = row['code']
-            id = row['id']
-            amount = row['amount']*100
-            code_denomalized = denormalize_code(code)
-            # 如果传入数据没有这个股票的实时信息，则略过
-            if code_denomalized not in data.keys():
-                continue
-            else:
-                # 捕获当前的价格
-                now = data[code_denomalized]['now']
-                # 如果状态为未买入
-                if row['state'] == 0:
-                    stra_buy = re.split(r"[ ,]",row['stra_param_buy'])
-                    if stra_buy[0].split(":")[0] == 'price':
-                        # 如果是price策略，则判断
-                        target_price = float(stra_buy[0].split(":")[1])
-                        if now <= target_price:
-                            # 下单会返回一个委托单号{'entrust_no':},如果成交/错误则返回{'message':}
-                            return_info = bigdata1.buy(code[:6],target_price,amount)
-                            print(stra_buy[0],return_info)
-                            # 已经存在下单单号
-                            if 'entrust_no' in return_info.keys():
-                                update_dict[return_info['entrust_no']] = id
-                    elif stra_buy[0].split(":")[0] == 'percent':
-                        # 如果是percent策略，则判断买入价格是否到达对应百分比，默认买入是1-percent
-                        target_percent = stra_buy[0].split(":")[1]
-                        target_percent = float(target_percent.split('%')[0])
-                        target_price = float(stra_buy[1].split(":")[1])
-                        target_price = target_price*(1-0.01*target_percent)
-                        if now <= target_price:
-                            # 下单会返回一个委托单号{'entrust_no':},如果成交/错误则返回{'message':}
-                            return_info = bigdata1.buy(code[:6],target_price,amount)
-                            print(stra_buy[0],return_info)
-                            # 已经存在下单单号
-                            if 'entrust_no' in return_info.keys():
-                                update_dict[return_info['entrust_no']] = id
-                    elif stra_buy[0].split(":")[0] == 'ma1':
-                        # 如果是MA策略，则判断对应股票是否在redis中
-                        current_day = datetime.date.today()
-                        md1 = int(stra_buy[0].split(":")[1])
-                        md2 = int(stra_buy[1].split(":")[1])
-                        DateKey = current_day.strftime("%Y%m%d")+":"+str(md1)+str(md2)
-                        result = r.get(DateKey)
-                        if result == None:
-                            result = get_ma(md1=md1,md2=md2)
-
-                        result = json.loads(result)
-                        result = pd.DataFrame(result,columns=['name','code','close'])
-                        # 返回的dataframe中的全都是md1>md2的，则如果股票代码在其中就可以买入
-                        if not result[result['code'].str.contains(code)].empty:
-                            return_info = bigdata1.buy(code[:6],now,amount)
-                            print(stra_buy[0],return_info)
-                            # 已经存在下单单号
-                            if 'entrust_no' in return_info.keys():
-                                update_dict[return_info['entrust_no']] = id
-
-                else:
-                    # 如果状态为已买入,需要检查一下是否当天买入
-                    if row['updated_time'] == datetime.datetime.today:
-                        continue
-                    stra_sell = re.split(r"[ ,]",row['stra_param_sell'])
-                    if stra_sell[0].split(':')[0] == 'price':
-                        # 如果是price策略，则判断
-                        target_price = float(stra_sell[0].split(':')[1])
-                        if now >= target_price:
-                            # 下单会返回一个委托单号{'entrust_no':},如果成交/错误则返回{'message':}
-                            return_info = bigdata1.sell(code[:6],target_price,amount)
-                            print(stra_buy[0],return_info)
-                            # 已经存在下单单号
-                            if 'entrust_no' in return_info.keys():
-                                update_dict[return_info['entrust_no']] = id
-                    elif stra_sell[0].split(':')[0] == 'percent':
-                        # 如果是percent策略，则判断
-                        target_percent = stra_sell[0].split(":")[1]
-                        target_percent = float(target_percent.split('%')[0])
-                        target_price = float(stra_sell[1].split(":")[1])
-                        target_price = target_price*(1+0.01*target_percent)
-                        if now >= target_price:
-                            # 下单会返回一个委托单号{'entrust_no':},如果成交/错误则返回{'message':}
-                            return_info = bigdata1.sell(code[:6],target_price,amount)
-                            print(stra_buy[0],return_info)
-                            # 已经存在下单单号
-                            if 'entrust_no' in return_info.keys():
-                                update_dict[return_info['entrust_no']] = id
-                    elif stra_sell[0].split(':')[0] == 'ma1':
-                        # 如果是MA策略，则判断
-                        # 如果是MA策略，则判断对应股票是否在redis中
-                        current_day = datetime.date.today()
-                        md1 = int(stra_sell[0].split(":")[1])
-                        md2 = int(stra_sell[1].split(":")[1])
-                        DateKey = current_day.strftime("%Y%m%d")+":"+str(md1)+str(md2)
-                        result = r.get(DateKey)
-                        if result == None:
-                            result = get_ma(md1=md1,md2=md2)
-
-                        result = json.loads(result)
-                        result = pd.DataFrame(result,columns=['name','code','close'])
-                        # 返回的dataframe中的全都是md1>md2的，则如果股票代码不在其中就可以卖出
-                        if not result[result['code'].str.contains(code)].empty:
-                            return_info = bigdata1.sell(code[:6],now,amount)
-                            print(stra_buy[0],return_info)
-                            # 已经存在下单单号
-                            if 'entrust_no' in return_info.keys():
-                                update_dict[return_info['entrust_no']] = id
-        # 根据当日成交来判断update_info中的信息是否应该更新
-        print("get today_trades")
-        trade_info = bigdata1.today_trades
-        trade_info = pd.DataFrame(trade_info)
-        del_key = []
-        for key,value in update_dict.items():
-            res = trade_info[trade_info['委托序号']==key]
-            if res.empty:
-                continue
-            # 当前记录已经成交
-            else:
-                del_key.append(key)
-                state = 0
-                price = res['成交价格']
-                updated_time = res['成交时间']
-                updated_time = datetime.datetime.strptime(updated_time,"%Y-%m-%d")
-                updated_time = datetime.date(updated_time)
-                if res['买卖标志'] == '买入':
-                    state = 1
-                    sql = 'update stockorder set state =\'%d\',updated_time = \'%s\', buy_price = \'%f\' where id = \'%d\'' %(state,updated_time,price,id)
-                    cur.execute(sql)
-                else:
-                    state = 2
-                    sql = 'update stockorder set state =\'%d\',updated_time = \'%s\', sell_price = \'%f\' where id = \'%d\'' %(state,updated_time,price,id)
-                    cur.execute(sql)
-        # 删去已更新的信息
-        for element in del_key:
-            del update_dict[element]
-        print("finish updating stockorder")   
-                    
-                
 
 # 获得股票代码列表
 code = get_all_stock_code()
@@ -309,13 +61,6 @@ async def start_judge():
         )['cal_date'].tolist()
     return "success"
 
-# @app.get("/start")
-# async def start_process():
-#     try:
-#         bigdata1.prepare(user='123456789', comm_password='123456',exe_path=r'E:\\stock_backend\\ths')
-#     except:
-#         bigdata1.prepare(user='123456789', comm_password='123456',exe_path=r'E:\\stock_backend\\ths')
-#     return "启动成功"
 
 @app.get("/app/",summary="根目录进行交易端选定")
 async def start_process():
@@ -328,45 +73,7 @@ async def start_process():
     start()
     return "hello for fastapi"
 
-def get_ma(md1,md2):
-    current_day = datetime.date.today()
-    DateKey = current_day.strftime("%Y%m%d")+":"+str(md1)+str(md2)
-    result = r.get(DateKey)
-    if result == None:
-        # 从数据库中获得上一个交易日的所有股票代码
-        df = pd.DataFrame(columns=['name','code','close'])
-        yesterday = trade_cal[1]
 
-        sql_code = 'select code from daily_stock where date = \'%s\''%(yesterday)
-        cur.execute(sql_code)
-        result = cur.fetchall()
-        code_list = [result[i][0].split(' ')[0] for i in range(len(result))]
-        # 起始日期的下标刚好是md2，因为下标0代表今天,放入data中
-        start = trade_cal[md2]
-        end = trade_cal[1]
-        sql = 'select date,name,code,close from daily_stock where date >= \'%s\' and date<= \'%s\''%(start,end)
-        cur.execute(sql)
-        data = cur.fetchall()
-        data = pd.DataFrame(data,columns=['date','name','code','close'])
-        data['name'] = data['name'].str.strip()
-        data['code'] = data['code'].str.strip()
-        # 进行计算
-        for code in code_list[0:10]:
-            info = data[data['code']==code]
-            # 将该股票的dataframe按时间降序排列
-            new_info = info.sort_values(by='date',inplace=False,ascending=False)
-            val_ma1 = new_info.iloc[:md1,3].mean()
-            val_ma2 = new_info.iloc[:,3].mean()
-            # 满足条件则插入dateframe
-            if val_ma1 > val_ma2:
-                name = new_info.iloc[0,1]
-                close = float(new_info.iloc[0,3])
-                indexsize = df.index.size
-                df.loc[indexsize] = [name,code,close]
-                df.index = df.index + 1
-        result = df.to_json(orient="records")
-        r.set(DateKey,result)
-    return result
 
 @app.post("/app/getStrategyInfo",summary="全部取出到dataframe处理")
 async def getStrategyInfo(item :MA):
@@ -566,7 +273,7 @@ async def getPositionHasBuy(request :Request):
         dbData = pd.DataFrame(dbData,columns=['id','code'])
         for i in range(len(dbData)):
             # 依次查找每一个股票的实时价格数据
-            code = dbData.loc[i,'code'].split('.')[0]
+            code = denormalize_code(dbData.loc[i,'code'])
             for k,v in tickData.items():
                 if code in k:
                     sqlUpdate = 'update stockorder set price = %f where id =%d'%(v['now'],dbData.loc[i,'id'])
@@ -727,5 +434,7 @@ async def test():
     result = a+b
     return "yes"
 
-if __name__ == "__main__":
-    uvicorn.run(app="main:app",host="192.168.1.57",port=8000,reload=True)
+if __name__ == "__main__": 
+
+    uvicorn.run(app="Utils:app",host="192.168.1.57",port=8000,reload=True)
+    # uvicorn.run(app="Utils:app",host="localhost",port=8000,reload=True)

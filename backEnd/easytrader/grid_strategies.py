@@ -200,22 +200,25 @@ class Xls(BaseStrategy):
         self._trader.wait(0.2)
         self._trader.app.top_window().type_keys("%{s}%{y}", set_foreground=False)
 
-        # 如果出现验证码，则需要识别验证码
+        if not (self._trader.app.top_window().window(class_name="Static", title_re="验证码").exists()):
+            self._need_captcha_reg = False
+        else:
+            self._need_captcha_reg = True
         self._captcha_cope()
 
         # Wait until file save complete otherwise pandas can not find file
-        self._trader.wait(0.5)
-
-        # 当输完验证码过后还需要重新保存为xls文件
-        self._set_foreground(self._trader.app.top_window())
-        self._trader.app.top_window().Edit1.set_edit_text(temp_path)
         self._trader.wait(0.2)
-        self._trader.app.top_window().type_keys("%{s}%{y}", set_foreground=False)
-        self._trader.wait(0.2)
+        if self._need_captcha_reg:
+            # 当输完验证码过后还需要重新保存为xls文件
+            self._set_foreground(self._trader.app.top_window())
+            self._trader.app.top_window().Edit1.set_edit_text(temp_path)
+            self._trader.wait(0.1)
+            self._trader.app.top_window().type_keys("%{s}%{y}", set_foreground=False)
+            self._trader.wait(0.1)
 
         if self._trader.is_exist_pop_dialog():
             self._trader.app.top_window().Button2.click()
-            self._trader.wait(0.2)
+            self._trader.wait(0.1)
         return self._format_grid_data(temp_path)
 
     def _captcha_cope(self):
@@ -250,7 +253,7 @@ class Xls(BaseStrategy):
                         ).type_keys(
                             captcha_num
                         )  # 模拟输入验证码
-                        time.sleep(0.5)
+                        time.sleep(0.2)
                         self._trader.app.top_window().set_focus()
                         pywinauto.keyboard.SendKeys("{ENTER}")  # 模拟发送enter，点击确定
                         time.sleep(0.2)
@@ -267,19 +270,19 @@ class Xls(BaseStrategy):
                             found = True
                             break
                     count -= 1
-                    self._trader.wait(0.1)
+                    self._trader.wait(0.2)
                     self._trader.app.top_window().window(
                         control_id=0x965, class_name="Static"
                     ).click()
                     print("即将对验证码数据进行清空")
-                    self._trader.wait(0.5)
+                    self._trader.wait(0.2)
                     # 如果验证码识别错误则对控件数据进行清空
                     self._trader.app.top_window().window(
                         control_id=0x964, class_name="Edit"
                     ).type_keys(
-                        "^a{BACKSPACE}"
+                        "{BACKSPACE}{BACKSPACE}{BACKSPACE}{BACKSPACE}"
                     )  # 模拟输入验证码
-                    self._trader.wait(0.5)
+                    self._trader.wait(0.2)
                 if not found:
                     self._trader.app.top_window().Button2.click()  # 点击取消
             

@@ -571,9 +571,19 @@ class ClientTrader(IClientTrader):
             try:
                 title = self._get_pop_dialog_title()
             except pywinauto.findwindows.ElementNotFoundError:
-                return {"message": "success"}
-
+                return {"message": "ElementNotFound"}
+            
             result = handler.handle(title)
+            self.wait(0.2)
+            # # 防止处理完委托确认和提示信息后新的dialog还没有弹出则直接跳出while
+            # if title == '提示信息' or title == '委托确认':
+            #     while True:
+            #         # 等待下一个dialog跳出
+            #         bExist = self.is_exist_pop_dialog()
+            #         if(bExist==False):
+            #             self.wait(0.5)
+            #         else:
+            #             break
             if result:
                 return result
         return {"message": "success"}

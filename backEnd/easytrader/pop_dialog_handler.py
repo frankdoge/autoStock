@@ -20,7 +20,7 @@ class PopDialogHandler:
             SetForegroundWindow(window.wrapper_object())  # bring to front
 
     @perf_clock
-    def handle(self, title):
+    def handle(self, title):    
         if any(s in title for s in {"提示信息", "委托确认", "网上交易用户协议", "撤单确认"}):
             self._submit_by_shortcut()
             return None
